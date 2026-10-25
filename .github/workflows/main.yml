@@ -1,0 +1,201 @@
+Name: PDR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  remote-windows:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+
+      - name: Performance & FPS Optimizations
+        shell: powershell
+        run: |
+          Write-Host "Aplicando otimizações de desempenho e FPS..."
+
+          $servicesToDisable = @("DiagTrack", "WSearch", "SysMain", "DoSvc")
+          foreach ($svc in $servicesToDisable) {
+            Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+          }
+
+          New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -Force
+
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338389Enabled" -Value 0 -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SystemPaneSuggestionsEnabled" -Value 0 -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Otimizações aplicadas com sucesso."
+
+      - name: Configure Custom "PC Cloud" Wallpaper
+        shell: powershell
+        run: |
+          Write-Host "Gerando e aplicando o papel de parede personalizado..."
+
+          $wallpaperPath = "C:\Windows\Web\Wallpaper\pc_cloud_wallpaper.jpg"
+          
+          Add-Type -AssemblyName System.Drawing
+
+          $width = 1920
+          $height = 1080
+          $bitmap = New-Object System.Drawing.Bitmap $width, $height
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+
+          $colorTop = [System.Drawing.Color]::FromArgb(255, 15, 5, 30)
+          $colorBottom = [System.Drawing.Color]::FromArgb(255, 110, 0, 200)
+          $rect = New-Object System.Drawing.Rectangle 0, 0, $width, $height
+          $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rect, $colorTop, $colorBottom, 90.0
+          
+          $graphics.FillRectangle($brush, $rect)
+
+          $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(40, 200, 100, 255), 2)
+          for ($i = 0; $i -lt $width; $i += 100) {
+            $graphics.DrawLine($pen, $i, 0, $i, $height)
+          }
+
+          $fontFamily = "Arial"
+          $fontSize = 110
+          $font = New-Object System.Drawing.Font($fontFamily, $fontSize, [System.Drawing.FontStyle]::Bold)
+          $textBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 240, 230, 255))
+          
+          $format = New-Object System.Drawing.StringFormat
+          $format.Alignment = [System.Drawing.StringAlignment]::Center
+          $format.LineAlignment = [System.Drawing.StringAlignment]::Center
+
+          $graphics.DrawString("PC Cloud", $font, $textBrush, ($width / 2), ($height / 2), $format)
+
+          $bitmap.Save($wallpaperPath, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+
+          $graphics.Dispose()
+          $bitmap.Dispose()
+          $brush.Dispose()
+          $textBrush.Dispose()
+          $font.Dispose()
+
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value $wallpaperPath
+          
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Wallpaper {
+              [DllImport("user32.dll", CharSet = CharSet.Auto)]
+              public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+          }
+"@
+          [Wallpaper]::SystemParametersInfo(20, 0, $wallpaperPath, 3)
+
+          Write-Host "Papel de parede 'PC Cloud' aplicado com sucesso."
+
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          Write-Host "Configurando RDP..."
+
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+          Set-Service -Name "TermService" -StartupType Automatic
+          Start-Service -Name "TermService"
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          Write-Host "RDP configurado."
+
+      - name: Create RDP Account
+        shell: powershell
+        run: |
+          $Username = "RemoteUser"
+          $Password = "RdpWin2026!X7q"
+
+          $oldUser = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
+          if ($oldUser) {
+            Remove-LocalUser -Name $Username
+          }
+
+          $SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+
+          New-LocalUser -Name $Username -Password $SecurePassword -Description "GitHub RDP User" -PasswordNeverExpires -AccountNeverExpires
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $Username
+          Add-LocalGroupMember -Group "Administrators" -Member $Username
+          Enable-LocalUser -Name $Username
+
+          "RDP_USER=$Username" >> $env:GITHUB_ENV
+          "RDP_PASSWORD=$Password" >> $env:GITHUB_ENV
+
+          Write-Host "================================"
+          Write-Host "USUARIO: .\$Username"
+          Write-Host "SENHA:   $Password"
+          Write-Host "================================"
+
+      - name: Verify User
+        shell: powershell
+        run: |
+          $user = Get-LocalUser -Name "RemoteUser"
+          if (!$user) {
+            Write-Error "A conta não foi criada."
+            exit 1
+          }
+          if ($user.Enabled -ne $true) {
+            Write-Error "A conta está desativada."
+            exit 1
+          }
+          Write-Host "Conta encontrada: $($user.Name)"
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $Installer = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $Installer
+          Start-Process msiexec.exe -ArgumentList "/i `"$Installer`" /quiet /norestart" -Wait
+          Remove-Item $Installer -Force
+
+      - name: Connect Tailscale
+        shell: powershell
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $Tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (!(Test-Path $Tailscale)) {
+            Write-Error "Tailscale não encontrado."
+            exit 1
+          }
+          & $Tailscale up --authkey="$env:TS_AUTHKEY" --hostname="github-rdp-$env:GITHUB_RUN_ID"
+          Start-Sleep -Seconds 10
+          $IP = (& $Tailscale ip -4).Trim()
+          if (!$IP) {
+            Write-Error "IP Tailscale não encontrado."
+            exit 1
+          }
+          "TAILSCALE_IP=$IP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $IP"
+
+      - name: Verify RDP Port
+        shell: powershell
+        run: |
+          Start-Sleep -Seconds 5
+          $Test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "Porta 3389: $($Test.TcpTestSucceeded)"
+          if (!$Test.TcpTestSucceeded) {
+            Write-Error "A porta 3389 não está acessível."
+            exit 1
+          }
+
+      - name: Connection Information
+        shell: powershell
+        run: |
+          Write-Host "=============================================="
+          Write-Host "             RDP DISPONIVEL (PDR)             "
+          Write-Host "=============================================="
+          Write-Host "ENDERECO: $env:TAILSCALE_IP"
+          Write-Host "USUARIO:  .\RemoteUser"
+          Write-Host "SENHA:    $env:RDP_PASSWORD"
+          Write-Host "PORTA:    3389"
+          Write-Host "=============================================="
+
+      - name: Keep RDP Online
+        shell: powershell
+        run: |
+          while ($true) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] PDR RDP ativo."
+            Start-Sleep -Seconds 300
+          }
